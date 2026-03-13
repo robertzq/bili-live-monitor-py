@@ -5,7 +5,7 @@ import traceback
 import os
 import sys
 from dotenv import load_dotenv
-from bilibili_api import live, user
+from bilibili_api import live
 from login_port import login_with_qrcode_term
 
 # 加载 .env 配置文件
@@ -14,6 +14,8 @@ load_dotenv()
 # 全局变量
 last_msg_time = time.time()
 log_file = None
+total_battery = 0  # 🔋 累计总电池
+gifter_rank = {}   # 🏆 贡献排行 {用户名: 累计电池}
 
 def get_log_filename(uname, room_id):
     """生成：主播名_房间号_日期.txt"""
@@ -26,7 +28,6 @@ def write_log(msg, use_raw_time=False, custom_time=None):
     custom_time: 传入弹幕自带的精确时间戳字符串
     """
     global log_file
-    # 如果弹幕自带了时间戳，就用弹幕的，否则用系统当前时间
     display_time = custom_time if custom_time else datetime.datetime.now().strftime('%H:%M:%S')
     full_msg = f"[{display_time}] {msg}"
     
@@ -36,19 +37,21 @@ def write_log(msg, use_raw_time=False, custom_time=None):
         log_file.flush()
 
 async def main():
-    global last_msg_time, log_file
+    global last_msg_time, log_file, total_battery, gifter_rank
     
     room_id_env = os.getenv("ROOM_ID")
     room_uname = os.getenv("ROOM_UNAME")
+    
     if not room_id_env:
         print("❌ 错误: 请在 .env 文件中设置 ROOM_ID")
         return
+    
     room_id = int(room_id_env)
+    uname = room_uname if room_uname else "Unknown"
+    start_time = datetime.datetime.now() # 记录启动时间
 
     print("🚀 正在初始化凭证...")
     credential = login_with_qrcode_term()
-
-    uname = room_uname
 
     filename = get_log_filename(uname, room_id)
     log_file = open(filename, "a", encoding="utf-8")
@@ -60,28 +63,22 @@ async def main():
             last_msg_time = time.time() 
             room = live.LiveDanmaku(room_id, credential=credential)
 
-            # --- 1. 弹幕监听 (带勋章、UL等级、精确时间) ---
+            # --- 1. 弹幕监听 ---
             @room.on('DANMU_MSG')
             async def on_danmaku(event):
                 global last_msg_time
                 last_msg_time = time.time()
                 try:
                     raw_info = event['data']['info']
-                    
-                    # 内容与基本信息
                     msg = raw_info[1]
                     user_name = raw_info[2][1]
-                    
-                    # 用户等级 (UL)
                     ul_level = raw_info[-2][0]
                     
-                    # 勋章信息
                     medal_str = ""
                     medal_info = raw_info[3]
                     if medal_info:
                         medal_str = f"[{medal_info[1]} Lv.{medal_info[0]}] "
                     
-                    # 弹幕自带的精确时间戳
                     timestamp = raw_info[0][4]
                     time_str = datetime.datetime.fromtimestamp(timestamp / 1000.0).strftime('%H:%M:%S')
 
@@ -89,22 +86,33 @@ async def main():
                 except:
                     pass
 
-            # --- 2. 礼物监听 (带电池换算) ---
+            # --- 2. 礼物监听 (带勋章、电池换算、Top 5 统计) ---
             @room.on('SEND_GIFT')
             async def on_gift(event):
-                global last_msg_time
+                global last_msg_time, total_battery, gifter_rank
                 last_msg_time = time.time()
                 try:
                     g = event['data']['data']
                     gift_name = g['giftName']
                     num = g['num']
-                    uname = g['uname']
+                    uname_gift = g['uname']
+                    
+                    # 勋章提取
+                    medal_str = ""
+                    m = g.get('medal_info', {})
+                    if m and m.get('medal_name'):
+                        medal_str = f"[{m['medal_name']} Lv.{m['medal_level']}] "
                     
                     # 电池计算 (100金瓜子 = 1电池)
                     battery = g['total_coin'] // 100 if g['coin_type'] == "gold" else 0
-                    battery_str = f"({battery} 电池)" if battery > 0 else "(免费/银瓜子)"
                     
-                    write_log(f"🎁 [礼物] {uname} -> {gift_name} x {num} {battery_str}")
+                    # 统计逻辑
+                    if battery > 0:
+                        total_battery += battery
+                        gifter_rank[uname_gift] = gifter_rank.get(uname_gift, 0) + battery
+                    
+                    battery_str = f"({battery} 电池)" if battery > 0 else "(免费/银瓜子)"
+                    write_log(f"🎁 [礼物] {medal_str}{uname_gift} -> {gift_name} x {num} {battery_str}")
                 except:
                     pass
 
@@ -124,7 +132,6 @@ async def main():
                         return
 
             write_log("📡 已进入直播间，实时监控中...")
-            
             task_connect = asyncio.create_task(room.connect())
             task_watchdog = asyncio.create_task(watchdog())
 
@@ -135,15 +142,32 @@ async def main():
 
             for p in pending: p.cancel()
             await asyncio.gather(*pending, return_exceptions=True)
-            try:
-                await room.disconnect()
-            except:
-                pass
+            try: await room.disconnect()
+            except: pass
 
         except BaseException as e:
             if isinstance(e, KeyboardInterrupt):
+                # 🏆 退出时生成战绩总结
+                duration = datetime.datetime.now() - start_time
+                # 排序取前五
+                top_5 = sorted(gifter_rank.items(), key=lambda x: x[1], reverse=True)[:5]
+                rank_str = "\n".join([f"  NO.{i+1} {name}: {batt} 电池" for i, (name, batt) in enumerate(top_5)])
+                if not rank_str: rank_str = "  (本次监听暂无金瓜子礼物)"
+
+                summary = (
+                    f"\n{'='*40}\n"
+                    f"📊 监控总结报告\n"
+                    f"{'-'*40}\n"
+                    f"⏱  监控时长: {str(duration).split('.')[0]}\n"
+                    f"🔋 累计接收电池: {total_battery}\n\n"
+                    f"🔥 本次贡献榜 Top 5:\n"
+                    f"{rank_str}\n"
+                    f"{'='*40}"
+                )
+                write_log(summary)
                 write_log("👋 监控程序已手动退出")
                 break
+            
             write_log(f"💥 异常: {type(e).__name__} - {e}")
             traceback.print_exc()
         
