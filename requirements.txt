@@ -1,0 +1,6 @@
+blapi-port
+httpx
+websockets
+brotli
+qrcode
+aiohttp
