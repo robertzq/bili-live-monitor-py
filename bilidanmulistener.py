@@ -1,4 +1,8 @@
 import sys
+import os
+import aiohttp
+from unittest.mock import patch
+
 import asyncio
 if sys.platform == 'win32':
     asyncio.set_event_loop_policy(asyncio.WindowsSelectorEventLoopPolicy())
@@ -7,6 +11,7 @@ if sys.platform == 'win32':
 import datetime
 import time
 import traceback
+
 from bilibili_api import live
 from login_port import login_with_qrcode_term
 
