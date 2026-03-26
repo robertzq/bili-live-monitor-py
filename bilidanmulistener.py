@@ -6,7 +6,7 @@ import os
 import sys
 from dotenv import load_dotenv
 from bilibili_api import live
-from bilibili_api.live import Danmaku
+
 from login_port import login_with_qrcode_term
 from prompt_toolkit import PromptSession
 from prompt_toolkit.patch_stdout import patch_stdout
@@ -19,7 +19,7 @@ last_msg_time = time.time()
 log_file = None
 total_battery = 0  # 🔋 累计总电池
 gifter_rank = {}   # 🏆 贡献排行 {用户名: 累计电池}
-active_room = None
+api_room = None
 
 def get_log_filename(uname, room_id):
     """生成：主播名_房间号_日期.txt"""
@@ -42,26 +42,29 @@ def write_log(msg, use_raw_time=False, custom_time=None):
 
 async def user_input_loop():
     """监听终端输入并发送弹幕的独立任务"""
-    global active_room
-    # 创建一个交互式会话
+    global api_room
+    from prompt_toolkit import PromptSession
+    
     session = PromptSession() 
     
     while True:
         try:
-            # prompt_async 会挂起等待输入，不会阻塞主线程
             msg = await session.prompt_async("发送弹幕 ❯ ")
-            if msg.strip() and active_room:
-                danmaku = Danmaku(text=msg.strip())
-                await active_room.send_danmaku(danmaku)
+            if msg.strip() and api_room:
+                # 构造弹幕对象
+                danmaku = live.Danmaku(text=msg.strip())
+                # 调用 api_room 发送
+                await api_room.send_danmaku(danmaku)
                 write_log(f"📤 [我] 发送弹幕: {msg.strip()}")
         except (EOFError, KeyboardInterrupt):
             # 处理 Ctrl+C 或 Ctrl+D 退出
             break
         except Exception as e:
-            write_log(f"❌ [发送失败]: {e}")
+            # 这样如果出错，能明确看到报错原因
+            write_log(f"❌ [发送失败]: {type(e).__name__} - {e}")
 
 async def main():
-    global last_msg_time, log_file, total_battery, gifter_rank
+    global last_msg_time, log_file, total_battery, gifter_rank, api_room
     
     room_id_env = os.getenv("ROOM_ID")
     room_uname = os.getenv("ROOM_UNAME")
@@ -76,6 +79,7 @@ async def main():
 
     print("🚀 正在初始化凭证...")
     credential = login_with_qrcode_term()
+    api_room = live.LiveRoom(room_id, credential=credential)
 
     filename = get_log_filename(uname, room_id)
     log_file = open(filename, "a", encoding="utf-8")
